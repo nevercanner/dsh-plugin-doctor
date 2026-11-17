@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-plugin-doctor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "已装插件配置体检：检查哪些插件缺 API 密钥/必填配置、哪些缺少它依赖的宿主服务，自动诊断依赖关系并给出可一键执行的修复与首次配置引导。",
   "private": true,
   "type": "module",
