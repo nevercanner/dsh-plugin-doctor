@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-plugin-doctor",
-  "version": "0.1.1",
-  "description": "已装插件配置体检：检查哪些插件缺 API 密钥/必填配置、哪些缺少它依赖的宿主服务，自动诊断依赖关系并给出可一键执行的修复与首次配置引导。",
+  "version": "0.2.0",
+  "description": "已装插件管理与体检：清单 / 启停 / 卸载 / GitHub 更新 / 配置校验 / 日志，并检查缺 API 密钥与缺宿主服务。插件落盘统一收敛到 D:\\deepseek\\plugins。",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
@@ -12,8 +12,11 @@
     "README.md"
   ],
   "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nevercanner/dsh-plugin-doctor"
+  },
   "peerDependencies": {
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
     "@deepseek-ai/schemastery": "^3.18.2",
@@ -45,10 +48,11 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-slots"
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
       ],
       "platform": "web"
-    }
+    },
+    "updateRef": "main"
   }
 }
