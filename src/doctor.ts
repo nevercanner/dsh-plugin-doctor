@@ -395,7 +395,10 @@ export function scanComposition(ctx: Context, state: { known: string[]; acked: s
         /* 坏 schema 不该让整张报表塌掉 */
       }
     }
-    const gaps = disabled ? [] : collectGaps(fields)
+    // 环境变量类缺口要"翻译"成真正可填的字段：
+    //   `xxxEnv`（存变量名）→ 该插件若有 `xxx`/`xxxKey` 直填字段且为空，就报那个字段。
+    // 否则「首次配置」会让用户去填变量名，填一百次也不会生效。
+    const gaps = disabled ? [] : remapEnvGaps(collectGaps(fields), fields)
 
     let severity: Severity | 'ok' = 'ok'
     let errorText: string | undefined
@@ -656,8 +659,36 @@ function hasDefault(field: FieldSpec): boolean {
  * @param envPath 出问题的 Env 字段路径
  * @returns 孪生的直填字段；没有则 undefined
  */
-function siblingDirectKey(fields: FieldSpec[], envPath: string): FieldSpec | undefined {
-  const segs = envPath.split('.')
+/**
+ * 把"环境变量名"类缺口换成真正能填的字段。
+ *
+ * `collectGaps` 交回来的是 `apiKeyEnv: 'DEEPSEEK_API_KEY'` 这种"变量名没值"的缺口，
+ * 但在面板里填它只改变量名，`process.env` 不会因此多出变量 —— 用户填一百次都消不掉。
+ * 所以这里做一次映射：
+ *   · 有孪生直填字段且为空 → 换成那个字段（填真实密钥就能消除）
+ *   · 有孪生直填字段且已填 → 丢弃这条缺口（环境变量只是遗留默认值）
+ *   · 没有孪生字段 → 保留原样（并带上"填它不生效"的语义，由 finding 文案说明）
+ */
+function remapEnvGaps(gaps: FieldSpec[], fields: FieldSpec[]): FieldSpec[] {
+  const out: FieldSpec[] = []
+  for (const gap of gaps) {
+    if (gap.problem !== 'env-missing') { out.push(gap); continue }
+    const sibling = siblingDirectKey(fields, gap.path)
+    if (!sibling) { out.push(gap); continue }
+    const filled = sibling.current !== undefined && sibling.current !== null && String(sibling.current).trim() !== ''
+    if (filled) continue
+    out.push({
+      ...sibling,
+      problem: 'missing',
+      // 让 UI 直接显示"填真实密钥"而不是字段原始 label
+      label: sibling.label || '真实密钥',
+      description: `直接填真实密钥；${gap.path} 只是环境变量名（当前 ${String(gap.current)}），在它里面填值不生效`,
+    })
+  }
+  return out
+}
+
+function siblingDirectKey(fields: FieldSpec[], envPath: string): FieldSpec | undefined {  const segs = envPath.split('.')
   const leaf = segs[segs.length - 1]
   const m = /^(.*?)(env|envName|envVar)$/i.exec(leaf)
   if (!m) return undefined

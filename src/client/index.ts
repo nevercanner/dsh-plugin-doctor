@@ -69,6 +69,20 @@ interface FirstRunItem {
   note: string
 }
 
+/** 插件管家列表里的一行（对应宿主 registry.plugins[]）。 */
+interface ManagedPlugin {
+  id: string
+  name: string
+  version: string
+  status: 'enabled' | 'disabled' | 'installing' | 'failed' | 'unconfigured' | 'unknown'
+  path: string
+  errors: string[]
+  source: string
+  onDisk: boolean
+  disabled: boolean
+  entryCount?: number
+}
+
 interface DoctorReport {
   generatedAt: string
   profile: string
@@ -174,6 +188,19 @@ const CSS = `
 .pd-toast{position:sticky;bottom:0;margin-top:8px;padding:8px 12px;border-radius:8px;font-size:12px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2)}
 .pd-toast.is-bad{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
 .pd-footbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:none;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:8px;padding:5px;cursor:pointer;font-size:12px;font-family:inherit}
+.pd-manage-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:10px}
+.pd-manage-head .pd-note{flex:1;margin-bottom:0}
+.pd-manage-table td{padding:8px}
+.pd-path{font-size:11px;color:var(--dsw-alias-label-tertiary);word-break:break-all;max-width:260px}
+.pd-ops{display:flex;gap:5px;flex-wrap:wrap}
+.pd-btn.pd-mini{padding:3px 8px;font-size:11.5px;border-radius:6px}
+.pd-btn.pd-danger{color:var(--dsw-alias-state-error-primary);border-color:currentColor}
+.pd-btn.pd-danger:hover{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)}
+.pd-logdrawer{margin-top:12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-2);overflow:hidden}
+.pd-loghead{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l1)}
+.pd-loghead b{font-size:12.5px}
+.pd-loghead .pd-btn{margin-left:auto}
+.pd-logbody{margin:0;padding:10px 12px;max-height:320px;overflow:auto;font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dsw-alias-label-secondary)}
 .pd-footbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 `
 
@@ -191,9 +218,12 @@ function Panel() {
   const [report, setReport] = useState<DoctorReport | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [tab, setTab] = useState<'findings' | 'firstrun' | 'graph' | 'entries'>('findings')
+  const [tab, setTab] = useState<'findings' | 'firstrun' | 'graph' | 'entries' | 'manage'>('findings')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [toast, setToast] = useState<{ text: string; bad?: boolean } | null>(null)
+  const [registry, setRegistry] = useState<ManagedPlugin[] | null>(null)
+  const [manageBusy, setManageBusy] = useState('')
+  const [logOpen, setLogOpen] = useState<{ plugin: string; lines: string[] } | null>(null)
   const mounted = useRef(true)
 
   const load = useCallback(async (fresh: boolean) => {
@@ -224,6 +254,65 @@ function Panel() {
   }, [load])
 
   const dirty = useMemo(() => Object.entries(drafts).filter(([, value]) => value.trim() !== ''), [drafts])
+
+  // ── 插件管家：清单与四类操作 ───────────────────────────────────────────
+  const loadRegistry = useCallback(async () => {
+    try {
+      const data = await getJson(`${API}/plugins`)
+      if (mounted.current) setRegistry(Array.isArray(data?.plugins) ? data.plugins : [])
+    } catch (cause) {
+      if (mounted.current) setToast({ text: `读取插件清单失败：${cause instanceof Error ? cause.message : String(cause)}`, bad: true })
+    }
+  }, [])
+
+  useEffect(() => {
+    if (tab === 'manage') void loadRegistry()
+  }, [tab, loadRegistry])
+
+  /** 统一跑一个管家动作：置忙 → 请求 → 提示 → 刷新清单。 */
+  const manage = async (name: string, label: string, run: () => Promise<any>) => {
+    setManageBusy(name + ':' + label)
+    try {
+      const result = await run()
+      const ok = result?.ok !== false
+      setToast({ text: `${name} · ${label}：${result?.message ?? (ok ? '已完成' : '失败')}`, bad: !ok })
+      if (Array.isArray(result?.registry?.plugins)) setRegistry(result.registry.plugins)
+      else await loadRegistry()
+    } catch (cause) {
+      setToast({ text: `${name} · ${label} 失败：${cause instanceof Error ? cause.message : String(cause)}`, bad: true })
+    } finally {
+      if (mounted.current) setManageBusy('')
+    }
+  }
+
+  const doToggle = (p: ManagedPlugin) =>
+    manage(p.name, p.disabled ? '启用' : '禁用', () => post('/toggle', { pluginId: p.name, enabled: p.disabled }))
+
+  const doUninstall = (p: ManagedPlugin) => {
+    const yes = typeof window !== 'undefined' && typeof window.confirm === 'function'
+      ? window.confirm(`确定卸载 ${p.name}？会删除目录 ${p.path} 并清理引用。`)
+      : false
+    if (!yes) return
+    return manage(p.name, '卸载', () => post('/uninstall', { pluginId: p.name }))
+  }
+
+  const doUpdate = (p: ManagedPlugin) => manage(p.name, '更新', () => post('/update', { pluginId: p.name }))
+
+  const doValidate = (p: ManagedPlugin) =>
+    manage(p.name, '校验配置', async () => {
+      const r = await getJson(`${API}/validate?pluginId=${encodeURIComponent(p.name)}`)
+      const lines = Array.isArray(r?.errors) && r.errors.length
+        ? r.errors.map((e: any) => `${e.path} [${e.kind}] ${e.message}`).join('；')
+        : ''
+      return { ok: r?.ok !== false, message: lines || r?.message || '通过' }
+    })
+
+  const doLogs = (p: ManagedPlugin) =>
+    manage(p.name, '日志', async () => {
+      const r = await getJson(`${API}/logs?pluginId=${encodeURIComponent(p.name)}&limit=120`)
+      setLogOpen({ plugin: p.name, lines: Array.isArray(r?.lines) ? r.lines : [] })
+      return { ok: r?.ok !== false, message: r?.message ?? '' }
+    })
 
   const runFix = async (entryId: string, kind: string, path?: string, value?: unknown) => {
     setBusy(true)
@@ -327,6 +416,7 @@ function Panel() {
       ['firstrun', `首次配置 (${report.firstRun.length})`],
       ['graph', `依赖关系 (${report.services.filter((service) => !service.available).length} 项缺)`],
       ['entries', `全部插件 (${report.entries.length})`],
+      ['manage', '插件管家'],
     ].map(([key, label]) => h('button', {
       key,
       className: `pd-tab${tab === key ? ' is-active' : ''}`,
@@ -338,7 +428,20 @@ function Panel() {
   if (tab === 'findings') body = renderFindings(report, busy, runFix)
   else if (tab === 'firstrun') body = renderFirstRun(report, drafts, setDrafts, busy, saveFirstRun, ack)
   else if (tab === 'graph') body = renderGraph(report)
-  else body = renderEntries(report)
+  else if (tab === 'manage') {
+    body = renderManage({
+      rows: registry,
+      busyKey: manageBusy,
+      onReload: () => void loadRegistry(),
+      onToggle: (p) => void doToggle(p),
+      onUninstall: (p) => void doUninstall(p),
+      onUpdate: (p) => void doUpdate(p),
+      onValidate: (p) => void doValidate(p),
+      onLogs: (p) => void doLogs(p),
+      logOpen,
+      onCloseLogs: () => setLogOpen(null),
+    })
+  } else body = renderEntries(report)
 
   return h('div', { className: 'pd-root' }, head, stats, tabs,
     h('main', { className: 'pd-body' },
@@ -450,9 +553,89 @@ function renderGraph(report: DoctorReport) {
   )
 }
 
-function renderEntries(report: DoctorReport) {
-  return h('table', { className: 'pd-table' },
+const MANAGE_STATUS_LABEL: Record<string, string> = {
+  enabled: '启用',
+  disabled: '禁用',
+  installing: '装配中',
+  failed: '失败',
+  unconfigured: '待配置',
+  unknown: '未知',
+}
+
+function renderManage(props: {
+  rows: ManagedPlugin[] | null
+  busyKey: string
+  onReload: () => void
+  onToggle: (p: ManagedPlugin) => void
+  onUninstall: (p: ManagedPlugin) => void
+  onUpdate: (p: ManagedPlugin) => void
+  onValidate: (p: ManagedPlugin) => void
+  onLogs: (p: ManagedPlugin) => void
+  logOpen: { plugin: string; lines: string[] } | null
+  onCloseLogs: () => void
+}) {
+  const { rows, busyKey } = props
+  const btn = (p: ManagedPlugin, label: string, tone: string, onClick: () => void) => {
+    const busy = busyKey === p.name + ':' + label
+    return h('button', {
+      key: label,
+      className: `pd-btn pd-mini${tone ? ' ' + tone : ''}`,
+      disabled: Boolean(busyKey),
+      onClick,
+    }, busy ? '…' : label)
+  }
+
+  const head = h('div', { className: 'pd-manage-head' },
+    h('div', { className: 'pd-note' },
+      '这里能直接管插件：启用/禁用（宿主级 fiber dispose 与重装）、从 GitHub 更新、校验配置、看日志、卸载。',
+      ' 落盘根目录固定为 D:\\deepseek\\plugins，卸载前有路径白名单校验。'),
+    h('button', { className: 'pd-btn pd-ghost', onClick: props.onReload }, '刷新清单'),
+  )
+
+  if (!rows) {
+    return h('div', null, head, h('div', { className: 'pd-empty' }, '正在读取插件清单…'))
+  }
+  if (!rows.length) {
+    return h('div', null, head, h('div', { className: 'pd-empty' }, '没有读到任何插件。'))
+  }
+
+  const table = h('table', { className: 'pd-table pd-manage-table' },
     h('thead', null, h('tr', null,
+      h('th', null, '插件'), h('th', null, '版本'), h('th', null, '状态'), h('th', null, '路径'), h('th', null, '操作'),
+    )),
+    h('tbody', null, ...rows.map((p) => h('tr', { key: p.name + '@' + p.version },
+      h('td', { className: 'pd-mono' }, p.name, p.entryCount && p.entryCount > 1 ? h('span', { className: 'pd-chip' }, p.entryCount + ' 入口') : null),
+      h('td', null, p.version || '—'),
+      h('td', { className: p.status === 'failed' ? 'pd-missing' : p.status === 'enabled' ? 'pd-ok' : '' },
+        MANAGE_STATUS_LABEL[p.status] ?? p.status),
+      h('td', { className: 'pd-mono pd-path' }, p.path || '（未落盘）'),
+      h('td', null, h('div', { className: 'pd-ops' },
+        btn(p, p.disabled ? '启用' : '禁用', p.disabled ? 'pd-primary' : '', () => props.onToggle(p)),
+        btn(p, '更新', '', () => props.onUpdate(p)),
+        btn(p, '校验', '', () => props.onValidate(p)),
+        btn(p, '日志', '', () => props.onLogs(p)),
+        btn(p, '卸载', 'pd-danger', () => props.onUninstall(p)),
+      )),
+    ))),
+  )
+
+  const drawer = props.logOpen
+    ? h('div', { className: 'pd-logdrawer' },
+        h('div', { className: 'pd-loghead' },
+          h('b', null, `日志 · ${props.logOpen.plugin}`),
+          h('span', { className: 'pd-chip' }, props.logOpen.lines.length + ' 行'),
+          h('button', { className: 'pd-btn pd-ghost pd-mini', onClick: props.onCloseLogs }, '关闭'),
+        ),
+        h('pre', { className: 'pd-logbody' },
+          props.logOpen.lines.length ? props.logOpen.lines.join('\n') : '（没有匹配行）'),
+      )
+    : null
+
+  return h('div', null, head, table, drawer)
+}
+
+function renderEntries(report: DoctorReport) {
+  return h('table', { className: 'pd-table' },    h('thead', null, h('tr', null,
       h('th', null, '插件'), h('th', null, '状态'), h('th', null, '缺服务'), h('th', null, '待填'), h('th', null, '提供'),
     )),
     h('tbody', null, ...report.entries.map((entry) => h('tr', { key: entry.entryId },
