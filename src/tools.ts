@@ -262,6 +262,104 @@ export function registerTools(sub: any, ctxConfig: any, defineTool: any): void {
       return lines.join('\n')
     },
   }))
+
+  // ── 全面验收（一屏给出 PASS/FAIL，不用挨个查） ──────────────────────────
+  sub.tools.register(defineTool({
+    name: 'final_audit',
+    description:
+      '对插件做一次全面验收并给出 PASS/FAIL 清单：entry 是否装配/是否失败、配置是否有缺项、落盘路径是否在 ' +
+      PLUGIN_ROOT +
+      ' 之内、必需工具是否已注册。不传 plugins 时审计全部落盘插件。用于"改完插件后确认真的生效了"。',
+    parameters: {
+      plugins: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '要审计的插件名（包名或短名）；省略则审计全部落盘插件',
+      },
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args: unknown, value: unknown) => text(String(value)),
+    },
+    async execute(args: any) {
+      const want: string[] = Array.isArray(args?.plugins)
+        ? args.plugins.filter((x: unknown) => typeof x === 'string')
+        : []
+      const report = buildRegistry(sub, sub.logger)
+      const pool = want.length
+        ? report.plugins.filter((p) => want.some((w) => p.name === w || p.name.replace(/^@[^/]+\//, '') === w))
+        : report.plugins.filter((p) => p.onDisk)
+
+      // 已注册的工具名
+      const registered = new Set<string>()
+      try {
+        const tools = safeGet(sub, 'tools')
+        const view = tools?.view?.(sub)
+        for (const n of view?.knownNames ?? []) registered.add(String(n))
+      } catch {
+        /* 拿不到就当空集，最后一行会提示 */
+      }
+      const expectedTools = [
+        'plugin_doctor_scan',
+        'list_installed_plugins',
+        'toggle_plugin',
+        'uninstall_plugin',
+        'update_plugin',
+        'validate_plugin_config',
+        'get_plugin_logs',
+        'plugin_storage_info',
+        'final_audit',
+      ]
+
+      const lines: string[] = []
+      lines.push(`插件全面验收 · 根目录 ${report.root}`)
+      lines.push(`被审对象 ${pool.length} 个${want.length ? '（指定清单）' : '（全部落盘）'}`)
+      lines.push('')
+
+      let fail = 0
+      if (!pool.length) {
+        lines.push('⚠️ 没有可审计的插件（落盘列表为空或名称不匹配）')
+      }
+      for (const p of pool) {
+        const problems: string[] = []
+        if (!p.onDisk) problems.push('目录不在插件根目录内')
+        if (p.status === 'failed') problems.push('entry 加载失败')
+        if (p.status === 'unknown' && !p.disabled) problems.push('没有 fiber（未装配）')
+        const gaps = p.config.filter((f) => f.problem)
+        if (gaps.length) problems.push(`配置缺项 ${gaps.map((f) => f.path).join('/')}`)
+        if (p.errors.length && p.status !== 'disabled') problems.push(p.errors[0].slice(0, 60))
+
+        const ok = problems.length === 0
+        if (!ok) fail++
+        lines.push(
+          `${ok ? '✅ PASS' : '❌ FAIL'}  ${p.name}@${p.version}` +
+            `  [${p.status}]  ${p.path || '(未落盘)'}`,
+        )
+        for (const msg of problems) lines.push(`        · ${msg}`)
+      }
+
+      // 工具注册核对
+      lines.push('')
+      lines.push('工具注册：')
+      const missing = expectedTools.filter((t) => !registered.has(t))
+      if (!registered.size) {
+        lines.push('  ⚠️ 读不到工具表（tools.view 不可用），跳过这一项')
+      } else {
+        for (const t of expectedTools) {
+          lines.push(`  ${registered.has(t) ? '✅' : '❌'} ${t}`)
+        }
+      }
+
+      lines.push('')
+      const summaryFail = fail + (missing.length ? 1 : 0)
+      lines.push(
+        summaryFail === 0
+          ? `结论：全部通过（${pool.length} 个插件 / ${expectedTools.length} 个工具）`
+          : `结论：${fail} 个插件有问题${missing.length ? `，缺 ${missing.length} 个工具` : ''}`,
+      )
+      return lines.join('\n')
+    },
+  }))
 }
 
 export { safeGet, errText }

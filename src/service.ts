@@ -236,24 +236,66 @@ export function buildRegistry(ctx: any, logger?: any): PluginRegistryReport {
     })
   }
 
-  // 盘上有、但当前 composition 里没挂载的（迁移后未重载 / 已卸载残留）
+  // 盘上有、但 configEditor 里没列出的插件。
+  //
+  // 注意：注入型 entry（super-injector 用 loader.create 建的）**不在** configEditor.entries()
+  // 里（那里只列 include 子树下的行），所以不能直接判成"未挂载"——必须回查 loader.entries()
+  // 看它有没有活着的 fiber，否则会把正在运行的插件误报成 disabled。
+  const loaderEntries = (() => {
+    try {
+      const loader = safeGet(ctx, 'loader')
+      return Array.from(loader?.entries?.() ?? []) as any[]
+    } catch {
+      return []
+    }
+  })()
+  const liveByName = new Map<string, { entryId: string; disabled: boolean; state: number | null; fiber: any }>()
+  for (const le of loaderEntries) {
+    if (!le?.options || le.options.group) continue
+    const nm = packageOf(le.options.name ?? '')
+    if (!nm) continue
+    // 同名多条时取最"活跃"的那条
+    const prev = liveByName.get(nm)
+    const cur = {
+      entryId: le.id,
+      disabled: Boolean(le.disabled),
+      state: typeof le.fiber?.state === 'number' ? le.fiber.state : null,
+      fiber: le.fiber,
+    }
+    if (!prev || (prev.state !== 2 && cur.state === 2)) liveByName.set(nm, cur)
+  }
+
   for (const [leaf, pkg] of onDisk) {
     const name = pkg?.name ?? leaf
     if (seen.has(name)) continue
+    const live = liveByName.get(name)
+    const liveStatus: PluginStatus = live
+      ? live.disabled
+        ? 'disabled'
+        : live.state === 2
+          ? 'enabled'
+          : live.state === 3
+            ? 'failed'
+            : 'unknown'
+      : 'disabled'
     plugins.push({
-      id: leaf,
+      id: live?.entryId ?? leaf,
       name,
       version: typeof pkg?.version === 'string' ? pkg.version : '—',
-      status: 'disabled',
+      status: liveStatus,
       path: join(PLUGIN_ROOT, leaf),
       config: [],
-      errors: ['未挂载到当前 composition（需重新装配或启用）'],
+      errors: live
+        ? liveStatus === 'failed'
+          ? ['entry 加载失败（详见日志）']
+          : []
+        : ['未挂载到当前 composition（需重新装配或启用）'],
       provides: [],
       requires: [],
       source: injectedByName.has(name) ? 'injected' : 'profile',
       onDisk: true,
       repository: repositoryUrlOf(pkg),
-      disabled: true,
+      disabled: live ? live.disabled : true,
     })
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-plugin-doctor",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "已装插件管理与体检：清单 / 启停 / 卸载 / GitHub 更新 / 配置校验 / 日志，并检查缺 API 密钥与缺宿主服务。插件落盘统一收敛到 D:\\deepseek\\plugins。",
   "private": true,
   "type": "module",

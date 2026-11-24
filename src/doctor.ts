@@ -442,6 +442,37 @@ export function scanComposition(ctx: Context, state: { known: string[]; acked: s
 
     for (const gap of gaps) {
       if (gap.problem === 'env-missing') {
+        // `XxxEnv` 字段存的是**环境变量名**，不是密钥本身。用户在这个字段里填任何值，
+        // 都不会让 process.env 多出那个变量 —— 所以"改环境变量名"是个死循环。
+        //
+        // 正确的出路有两条，按优先级：
+        //   ① 插件自己还有 `apiKey` 这类"直接填密钥"的字段（deepseek-web-search 就是这样）
+        //      → 引导用户填真实密钥，这条能被配置写入真正消除；
+        //   ② 没有直填字段 → 只能去启动环境设变量并重启，明确告知"填配置无效"。
+        const siblingKey = siblingDirectKey(fields, gap.path)
+        if (siblingKey && !siblingKey.current) {
+          findings.push({
+            id: `${entryId}::env::${gap.path}`,
+            entryId,
+            plugin,
+            severity: 'warning',
+            code: 'missing-env',
+            title: `${plugin} 缺少凭据：${siblingKey.path} 为空（${String(gap.current)} 环境变量也没设）`,
+            detail:
+              `字段 ${gap.path} 只是**环境变量名**（当前指向 ${String(gap.current)}，该变量在进程环境里为空），` +
+              `在它里面填值不会生效。这个插件另有 ${siblingKey.path} 可以直接填真实密钥。`,
+            suggestion: `在「首次配置」里填 ${siblingKey.path}（真实密钥）后保存，这条警告就会消失；` +
+              `或改去启动 dsh 的环境里设置 ${String(gap.current)} 再重启。`,
+            fix: { kind: 'set-field', label: '填真实密钥', path: siblingKey.path },
+          })
+          if (severity !== 'error') severity = 'warning'
+          continue
+        }
+        if (siblingKey && siblingKey.current) {
+          // 已经直填了密钥 → 环境变量那个只是遗留默认值，不该继续报
+          continue
+        }
+        // 没有直填字段：只告知，不给可点的"填配置"按钮（给了也是白填）
         findings.push({
           id: `${entryId}::env::${gap.path}`,
           entryId,
@@ -449,9 +480,10 @@ export function scanComposition(ctx: Context, state: { known: string[]; acked: s
           severity: 'warning',
           code: 'missing-env',
           title: `${plugin} 的环境变量没值：${String(gap.current)}`,
-          detail: `字段 ${gap.path} 指定了环境变量 ${String(gap.current)}，但当前进程环境里它是空的 —— 该插件会拿不到凭据。`,
-          suggestion: `在启动 dsh 的环境里设置 ${String(gap.current)} 后重启；或把 ${gap.path} 改成指向一个已有值的变量名。`,
-          fix: { kind: 'set-field', label: '改变量名', path: gap.path },
+          detail:
+            `字段 ${gap.path} 指定了环境变量 ${String(gap.current)}，但当前进程环境里它是空的 —— 该插件会拿不到凭据。` +
+            `注意：这个字段存的是**变量名**，在面板里填它不会生效。`,
+          suggestion: `在启动 dsh 的环境里设置 ${String(gap.current)} 并重启 dsh；或把 ${gap.path} 改成一个已在环境里有值的变量名。`,
         })
         if (severity !== 'error') severity = 'warning'
         continue
@@ -612,6 +644,33 @@ function rank(severity: Severity | 'ok'): number {
 
 function hasDefault(field: FieldSpec): boolean {
   return field.defaultValue !== undefined && field.defaultValue !== null
+}
+
+/**
+ * 给 `xxxEnv` 这种"存环境变量名"的字段，找到同一插件里"直接存密钥"的孪生字段。
+ *
+ * 例：`apiKeyEnv` → `apiKey`；`tokenEnv` → `token`；`secretEnv` → `secret`。
+ * 找到它就是找到了能真正消除警告的填值入口（在 Env 字段里填值永远无效）。
+ *
+ * @param fields 该插件摊平后的全部字段
+ * @param envPath 出问题的 Env 字段路径
+ * @returns 孪生的直填字段；没有则 undefined
+ */
+function siblingDirectKey(fields: FieldSpec[], envPath: string): FieldSpec | undefined {
+  const segs = envPath.split('.')
+  const leaf = segs[segs.length - 1]
+  const m = /^(.*?)(env|envName|envVar)$/i.exec(leaf)
+  if (!m) return undefined
+  const base = m[1]
+  if (!base) return undefined
+  const candidates = [`${base}Key`, `${base}`, `${base}Token`, `${base}Secret`]
+  const prefix = segs.slice(0, -1).join('.')
+  for (const name of candidates) {
+    const path = prefix ? `${prefix}.${name}` : name
+    const hit = fields.find((f) => f.path === path)
+    if (hit) return hit
+  }
+  return undefined
 }
 
 function safeGet(ctx: any, name: string): any {
